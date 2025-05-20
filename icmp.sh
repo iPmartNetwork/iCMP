@@ -162,6 +162,9 @@ fi
 # Main monitoring and restart loop
 while [ "\$MUST_TERMINATE" = 0 ]; do
   # Check connectivity using the tun0 interface
+  # Note: ICMP itself doesn't use ports like TCP/UDP. The :8080 in the curl command below
+  # is for a health check. It verifies connectivity to a service expected to be listening
+  # on \$REMOTE_TUN_IP (the server's tunnel IP) at port 8080, through the tunnel.
   if curl -s -m 5 --interface tun0 "\$REMOTE_TUN_IP:8080" >/dev/null 2>&1; then
     # echo "[$(date)] Connectivity OK via tun0." # Uncomment for verbose logging
     sleep 15 # Check less frequently if connection is stable
