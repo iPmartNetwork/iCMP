@@ -116,7 +116,7 @@ EOF
   # Networking configuration
   sysctl -w net.ipv4.ip_forward=1
   sysctl -w net.ipv4.icmp_echo_ignore_all=1
-  DEFAULT_IF=$(ip route show default | awk '{print $5}')
+  DEFAULT_IF=`ip route show default | awk '{print $5}'`
   iptables -t nat -A POSTROUTING -o $DEFAULT_IF -j MASQUERADE 2>/dev/null
   iptables -t nat -A POSTROUTING -o tun0 -j MASQUERADE 2>/dev/null
   iptables-save > /etc/iptables/rules.v4
@@ -179,7 +179,7 @@ EOF
 
   sysctl -w net.ipv4.ip_forward=1
   sysctl -w net.ipv4.icmp_echo_ignore_all=1
-  DEFAULT_IF=$(ip route show default | awk '{print $5}')
+  DEFAULT_IF=`ip route show default | awk '{print $5}'`
   iptables -t nat -A POSTROUTING -o $DEFAULT_IF -j MASQUERADE 2>/dev/null
   iptables-save > /etc/iptables/rules.v4
   systemctl enable netfilter-persistent
