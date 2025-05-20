@@ -71,28 +71,113 @@ REMOTE_TUN_IP="10.0.0.1"
 LOCAL_GATEWAY_FILE="$WORKDIR/local-gateway.txt"
 
 startTunnel() {
+  echo "[$(date)] Starting tunnel to \$FOREIGN_SERVER_IP..."
   \$ICMPTUNNEL_BIN "\$FOREIGN_SERVER_IP" &
   TUN_PID=\$!
-  sleep 2
-  ip addr add "\$LOCAL_TUN_IP/24" dev tun0 2>/dev/null
-  ip link set up dev tun0
-  ip route del default 2>/dev/null
-  ip route add default via "\$REMOTE_TUN_IP"
+  # Give icmptunnel a moment to start and potentially create tun0
+  sleep 3 # Increased from 2
+
+  # Wait for tun0 to appear
+  for i in {1..5}; do # Try for 5 seconds
+    if ip link show tun0 &>/dev/null; then
+      echo "[$(date)] tun0 device found."
+      ip addr add "\$LOCAL_TUN_IP/24" dev tun0 2>/dev/null
+      ip link set up dev tun0
+      sleep 1 # Allow interface to settle
+
+      ip route del default via "\$REMOTE_TUN_IP" dev tun0 2>/dev/null
+      ip route del default 2>/dev/null # Clear any other default route
+
+      ip route add default via "\$REMOTE_TUN_IP" dev tun0
+      if ip route | grep -q "default via \$REMOTE_TUN_IP dev tun0"; then
+        echo "[$(date)] Tunnel to \$FOREIGN_SERVER_IP established. Routes set."
+        return 0 # Success
+      else
+        echo "[$(date)] Error: Failed to set default route via \$REMOTE_TUN_IP."
+        if ip link show tun0 &>/dev/null; then
+            ip link set dev tun0 down 2>/dev/null
+        fi
+        kill \$TUN_PID 2>/dev/null # Kill the icmptunnel process we started
+        return 1 # Failure
+      fi
+    fi
+    if ! ps -p \$TUN_PID > /dev/null; then
+        echo "[$(date)] ICMP tunnel process (PID \$TUN_PID) died before tun0 appeared."
+        return 1 # Failure, icmptunnel process died
+    fi
+    echo "[$(date)] Waiting for tun0... attempt \$i/5"
+    sleep 1
+  done
+
+  echo "[$(date)] Error: tun0 device did not appear after waiting."
+  if ps -p \$TUN_PID > /dev/null; then
+      echo "[$(date)] Killing lingering icmptunnel process (PID \$TUN_PID)."
+      kill \$TUN_PID 2>/dev/null
+  fi
+  return 1 # Failure
 }
+
 stopTunnel() {
-  pkill -SIGTERM -f "\$ICMPTUNNEL_BIN"
+  echo "[$(date)] Stopping tunnel..."
+  # More specific pkill: pkill -SIGTERM -f "\$ICMPTUNNEL_BIN \"\$FOREIGN_SERVER_IP\""
+  # Using the existing pkill for now, assuming it's specific enough for this setup.
+  # If multiple icmptunnel instances run, this might need refinement (e.g. using PID files or more specific pgrep).
+  pkill -SIGTERM -f "\$ICMPTUNNEL_BIN \"\$FOREIGN_SERVER_IP\""
+  sleep 1
+
+  if ip link show tun0 &>/dev/null; then
+    echo "[$(date)] Bringing down tun0."
+    ip link set dev tun0 down 2>/dev/null
+  fi
+
+  echo "[$(date)] Restoring routes..."
+  ip route del default via "\$REMOTE_TUN_IP" dev tun0 2>/dev/null
   ip route del default 2>/dev/null
-  [ -f "\$LOCAL_GATEWAY_FILE" ] && ip route add default via "\$(cat \$LOCAL_GATEWAY_FILE)"
+  if [ -f "\$LOCAL_GATEWAY_FILE" ]; then
+    ORIG_GW=\$(cat "\$LOCAL_GATEWAY_FILE")
+    echo "[$(date)] Restoring original default gateway \$ORIG_GW."
+    ip route add default via "\$ORIG_GW" 2>/dev/null
+  else
+    echo "[$(date)] Original gateway file not found. Cannot restore."
+  fi
+  echo "[$(date)] Tunnel stopped."
 }
+
 MUST_TERMINATE=0
-trap "MUST_TERMINATE=1; stopTunnel; exit 0" INT TERM
-[ ! -f "\$LOCAL_GATEWAY_FILE" ] && ip route | grep "^default" | awk '{print \$3}' > "\$LOCAL_GATEWAY_FILE"
-stopTunnel
-startTunnel
+trap "echo '[$(date)] Received termination signal.'; MUST_TERMINATE=1; stopTunnel; echo '[$(date)] Exiting.'; exit 0" INT TERM
+
+# Save original gateway if not already saved
+if [ ! -f "\$LOCAL_GATEWAY_FILE" ]; then
+  ip route | grep "^default" | awk '{print \$3}' > "\$LOCAL_GATEWAY_FILE"
+  echo "[$(date)] Original gateway saved to \$LOCAL_GATEWAY_FILE."
+fi
+
+stopTunnel # Initial stop to ensure clean state
+
+# Try to start the tunnel initially.
+if ! startTunnel; then
+  echo "[$(date)] Initial tunnel start failed. Will retry in loop."
+fi
+
+# Main monitoring and restart loop
 while [ "\$MUST_TERMINATE" = 0 ]; do
-  sleep 5
-  curl -s -m 2 "\$REMOTE_TUN_IP:8080" >/dev/null 2>&1
-  [ \$? -eq 0 ] || { stopTunnel; sleep 5; startTunnel; }
+  # Check connectivity using the tun0 interface
+  if curl -s -m 5 --interface tun0 "\$REMOTE_TUN_IP:8080" >/dev/null 2>&1; then
+    # echo "[$(date)] Connectivity OK via tun0." # Uncomment for verbose logging
+    sleep 15 # Check less frequently if connection is stable
+  else
+    echo "[$(date)] Connectivity check failed or tunnel not fully up. Attempting restart..."
+    stopTunnel
+    echo "[$(date)] Waiting 5 seconds before attempting to restart tunnel..."
+    sleep 5
+    if ! startTunnel; then
+      echo "[$(date)] Failed to restart tunnel. Waiting 30 seconds before next attempt."
+      sleep 30 # Longer wait if startTunnel itself fails
+    else
+      echo "[$(date)] Tunnel restarted successfully. Waiting 15 seconds before next check."
+      sleep 15 # Wait a bit after successful restart before checking again
+    fi
+  fi
 done
 EOF
   chmod +x "$CLIENT_SCRIPT"
